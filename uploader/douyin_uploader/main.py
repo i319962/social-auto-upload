@@ -527,6 +527,24 @@ class DouYinVideo(DouYinBaseUploader):
         context = await set_init_script(context)
 
         page = await context.new_page()
+
+        # 拦截 create_v2 API 响应，捕获 aweme_id (item_id)
+        captured_aweme_id = None
+
+        async def on_response(response):
+            nonlocal captured_aweme_id
+            if '/aweme/create_v2/' in response.url and captured_aweme_id is None:
+                try:
+                    data = await response.json()
+                    if data.get('item_id'):
+                        captured_aweme_id = data['item_id']
+                        print(f"SAU_AWEME_ID:{captured_aweme_id}")
+                        douyin_logger.info(_msg("🔗", f"从API响应捕获 aweme_id: {captured_aweme_id}"))
+                except Exception:
+                    pass
+
+        page.on('response', on_response)
+
         await page.goto("https://creator.douyin.com/creator-micro/content/upload")
         douyin_logger.info(_msg("🏃", f"小人开始搬运视频: {self.title}.mp4"))
         douyin_logger.info(_msg("🧭", "小人正在赶往上传主页"))
@@ -598,6 +616,27 @@ class DouYinVideo(DouYinBaseUploader):
                     timeout=3000,
                 )
                 douyin_logger.success(_msg("🥳", "视频发布成功，小人开心收工"))
+                # 优先用拦截器捕获的 aweme_id（从 create_v2 API 响应获取）
+                if captured_aweme_id:
+                    print(f"SAU_AWEME_ID:{captured_aweme_id}")
+                    douyin_logger.info(_msg("🔗", f"使用捕获的 aweme_id: {captured_aweme_id}"))
+                else:
+                    # 备选：从 manage 页面的视频列表元素提取
+                    try:
+                        await page.wait_for_selector('[class*="video-item"]', timeout=8000)
+                        aweme_id_from_dom = await page.evaluate("""
+                            () => {
+                                const item = document.querySelector('[class*="video-item"]');
+                                return item?.dataset?.awemeId || item?.dataset?.videoId || '';
+                            }
+                        """)
+                        if aweme_id_from_dom:
+                            print(f"SAU_AWEME_ID:{aweme_id_from_dom}")
+                            douyin_logger.info(_msg("🔗", f"从DOM提取 aweme_id: {aweme_id_from_dom}"))
+                        else:
+                            douyin_logger.warning(_msg("⚠️", f"未能提取 aweme_id"))
+                    except Exception:
+                        douyin_logger.warning(_msg("⚠️", f"未能提取 aweme_id"))
                 break
             except Exception:
                 await self.handle_auto_video_cover(page)
