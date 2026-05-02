@@ -28,6 +28,25 @@ def _msg(emoji: str, text: str) -> str:
     return f"{emoji} {text}"
 
 
+async def douyin_open_browser(account_file, headless: bool = False):
+    """打开浏览器并加载已有 cookie，保持窗口直到用户手动关闭。"""
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=headless, channel="chrome")
+        context = await browser.new_context(storage_state=account_file if os.path.exists(account_file) else None)
+        context = await set_init_script(context)
+        page = await context.new_page()
+        await page.goto("https://creator.douyin.com/creator-micro/home")
+        douyin_logger.info(_msg("🪟", "浏览器已打开，请手动操作，关闭窗口后自动退出"))
+        try:
+            await context.wait_for_event("close")
+        except Exception:
+            pass
+        try:
+            await context.storage_state(path=account_file)
+        except Exception:
+            pass
+
+
 async def _emit_qrcode_callback(qrcode_callback, payload: dict):
     if not qrcode_callback:
         return
@@ -69,14 +88,20 @@ async def cookie_auth(account_file):
             await browser.close()
 
 
-async def douyin_setup(account_file, handle=False, return_detail=False, qrcode_callback=None, headless: bool = LOCAL_CHROME_HEADLESS):
+async def douyin_setup(account_file, handle=False, return_detail=False, qrcode_callback=None, headless: bool = LOCAL_CHROME_HEADLESS, keep_open: bool = False):
     if not os.path.exists(account_file) or not await cookie_auth(account_file):
         if not handle:
             result = _build_login_result(False, "cookie_invalid", "cookie文件不存在或已失效", account_file)
             return result if return_detail else False
         douyin_logger.info(_msg("🥹", "cookie 失效了，准备打开浏览器重新登录"))
-        result = await douyin_cookie_gen(account_file, qrcode_callback=qrcode_callback, headless=headless)
+        result = await douyin_cookie_gen(account_file, qrcode_callback=qrcode_callback, headless=headless, keep_open=keep_open)
         return result if return_detail else result["success"]
+
+    if keep_open:
+        douyin_logger.info(_msg("🪟", "cookie 有效，打开浏览器供手动操作"))
+        await douyin_open_browser(account_file, headless=headless)
+        result = _build_login_result(True, "cookie_valid", "已打开浏览器", account_file)
+        return result if return_detail else True
 
     result = _build_login_result(True, "cookie_valid", "cookie有效", account_file)
     return result if return_detail else True
@@ -438,7 +463,10 @@ class DouYinVideo(DouYinBaseUploader):
         return False
 
     async def set_thumbnail(self, page: Page):
+        douyin_logger.info(_msg("🔍", f"set_thumbnail 开始: landscape={self.thumbnail_landscape_path}, portrait={self.thumbnail_portrait_path}"))
+
         if not self.thumbnail_landscape_path and not self.thumbnail_portrait_path:
+            douyin_logger.warning(_msg("⚠️", "landscape 和 portrait 路径都为空，跳过封面设置"))
             return
 
         douyin_logger.info(_msg("🏃", "小人正在设置视频封面"))
@@ -446,21 +474,41 @@ class DouYinVideo(DouYinBaseUploader):
         cover_locator_str = 'div[id*="creator-content-modal"]'
         cover_locator = page.locator(cover_locator_str)
         await page.wait_for_selector(cover_locator_str)
+        douyin_logger.info(_msg("🔍", f"封面弹窗已打开"))
 
         upload_input = cover_locator.locator("div[class^='semi-upload upload'] >> input.semi-upload-hidden-input")
 
+        # 检查封面弹窗中的 steps/tabs 数量
+        steps_locator = cover_locator.locator("div[class*='steps'] div")
+        steps_count = await steps_locator.count()
+        douyin_logger.info(_msg("🔍", f"封面弹窗 steps 数量: {steps_count}"))
+
         if self.thumbnail_landscape_path:
+            douyin_logger.info(_msg("🔍", f"准备上传横版封面: {self.thumbnail_landscape_path}"))
             await page.wait_for_timeout(1000)
-            await upload_input.set_input_files(self.thumbnail_landscape_path)
-            await page.wait_for_timeout(2000)
-            douyin_logger.info(_msg("🖼️", "横版封面上传完成"))
+            try:
+                await upload_input.set_input_files(self.thumbnail_landscape_path)
+                await page.wait_for_timeout(2000)
+                douyin_logger.info(_msg("🖼️", "横版封面上传完成"))
+            except Exception as e:
+                douyin_logger.error(_msg("❌", f"横版封面上传失败: {e}"))
 
         if self.thumbnail_portrait_path:
-            await cover_locator.locator("div[class*='steps'] div").nth(1).click()
-            await page.wait_for_timeout(1000)
-            await upload_input.set_input_files(self.thumbnail_portrait_path)
-            await page.wait_for_timeout(2000)
-            douyin_logger.info(_msg("🖼️", "竖版封面上传完成"))
+            douyin_logger.info(_msg("🔍", f"准备上传竖版封面: {self.thumbnail_portrait_path}"))
+            if steps_count > 1:
+                douyin_logger.info(_msg("🔍", "点击竖版 tab (nth=1)"))
+                await steps_locator.nth(1).click()
+                await page.wait_for_timeout(1000)
+            else:
+                douyin_logger.warning(_msg("⚠️", f"steps 数量={steps_count}，不足2个，无法切换到竖版 tab"))
+            try:
+                await upload_input.set_input_files(self.thumbnail_portrait_path)
+                await page.wait_for_timeout(2000)
+                douyin_logger.info(_msg("🖼️", "竖版封面上传完成"))
+            except Exception as e:
+                douyin_logger.error(_msg("❌", f"竖版封面上传失败: {e}"))
+        else:
+            douyin_logger.warning(_msg("⚠️", "thumbnail_portrait_path 为空，跳过竖版封面上传"))
 
         await cover_locator.locator('button:visible:has-text("完成")').click()
         douyin_logger.info(_msg("🥳", "视频封面设置完成"))

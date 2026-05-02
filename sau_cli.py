@@ -168,9 +168,9 @@ def parse_schedule(raw_schedule: str | None) -> datetime | int:
     return datetime.strptime(raw_schedule, SCHEDULE_FORMAT)
 
 
-async def login_douyin_account(account_name: str, headless: bool = True) -> dict:
+async def login_douyin_account(account_name: str, headless: bool = True, relogin: bool = False) -> dict:
     account_file = resolve_account_file("douyin", account_name)
-    return await douyin_setup(str(account_file), handle=True, return_detail=True, headless=headless)
+    return await douyin_setup(str(account_file), handle=True, return_detail=True, headless=headless, keep_open=relogin)
 
 
 async def check_douyin_account(account_name: str) -> bool:
@@ -249,6 +249,7 @@ async def upload_video(request: DouyinVideoUploadRequest) -> Path:
         request.publish_date,
         str(account_file),
         desc=request.description,
+        thumbnail_landscape_path=str(request.thumbnail_file) if request.thumbnail_file else None,
         thumbnail_portrait_path=str(request.thumbnail_file) if request.thumbnail_file else None,
         productLink=request.product_link,
         productTitle=request.product_title,
@@ -448,6 +449,7 @@ def build_parser() -> argparse.ArgumentParser:
         action_parser.add_argument("--account", required=True, help="Douyin user-defined account_name")
         if action_name == "login":
             add_runtime_flags(action_parser)
+            action_parser.add_argument("--relogin", action="store_true", help="Force relogin even if cookie is valid")
 
     upload_video_parser = douyin_actions.add_parser("upload-video", help="Upload one video to Douyin")
     upload_video_parser.add_argument("--account", required=True, help="Douyin user-defined account_name")
@@ -547,7 +549,7 @@ def build_parser() -> argparse.ArgumentParser:
 async def dispatch(args: argparse.Namespace) -> int:
     if args.platform == "douyin":
         if args.action == "login":
-            result = await login_douyin_account(args.account, headless=args.headless)
+            result = await login_douyin_account(args.account, headless=args.headless, relogin=args.relogin)
             if not result["success"]:
                 raise RuntimeError(result["message"])
             print(f"Douyin login flow completed: {result['account_file']}")
